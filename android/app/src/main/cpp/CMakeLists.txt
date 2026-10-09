@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(lanaudio VERSION 1.0.0 LANGUAGES CXX)
+
+find_library(log-lib log)
+find_library(android-lib android)
+find_package(oboe CONFIG REQUIRED)
+add_library(lanaudio SHARED audio_client.cpp)
+target_compile_features(lanaudio PRIVATE cxx_std_20)
+target_compile_options(lanaudio PRIVATE -O3 -Wall -Wextra)
+target_link_libraries(lanaudio PRIVATE oboe::oboe ${log-lib} ${android-lib})

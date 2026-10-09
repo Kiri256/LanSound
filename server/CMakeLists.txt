@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.21)
+project(lan_audio_server VERSION 1.2.4 LANGUAGES CXX)
+
+set(LANAUDIO_PACKET_FRAMES 96 CACHE STRING "Audio frames per UDP packet (96, 192, or 240)")
+set_property(CACHE LANAUDIO_PACKET_FRAMES PROPERTY STRINGS 96 192 240)
+
+if(NOT WIN32)
+  message(FATAL_ERROR "The audio server currently targets Windows only")
+endif()
+
+add_executable(lan-audio-server main.cpp wasapi_capture.cpp)
+target_compile_features(lan-audio-server PRIVATE cxx_std_20)
+target_compile_definitions(lan-audio-server PRIVATE LANAUDIO_PACKET_FRAMES=${LANAUDIO_PACKET_FRAMES})
+target_compile_definitions(lan-audio-server PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lan-audio-server PRIVATE ole32 uuid avrt ws2_32 ksuser)
+if(MSVC)
+  target_compile_options(lan-audio-server PRIVATE /W4 /permissive- /O2)
+else()
+  target_compile_options(lan-audio-server PRIVATE -O2 -Wall -Wextra)
+  if(MINGW)
+    target_link_options(lan-audio-server PRIVATE -municode)
+  endif()
+endif()
