@@ -23,8 +23,13 @@ public:
         if (!valid_) return false;
         socket_ = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (socket_ < 0) return false;
-        int bytes = 256 * 1024;
+        // Keep kernel backlog bounded near the application latency budget.
+        // The application reorder/playback buffers remain the pacing authority.
+        int bytes = int(PacketBytes * 96);
         setsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
+        socklen_t actualBytes = sizeof(receiveBufferBytes_);
+        getsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &receiveBufferBytes_, &actualBytes);
+        receiveBufferBytes_ /= 2; // Linux reports the kernel's doubled accounting value.
         timeval timeout{0, 5000};
         setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         // Ephemeral local port; connected UDP filters other senders.
@@ -54,6 +59,9 @@ public:
             " stalls=" + std::to_string(metrics_.stallEvents.load()) +
             "\nrecv_poll_max_ms=" + std::to_string(metrics_.receivePoll.maxUs.load() / 1000) +
             " recv_long_polls=" + std::to_string(metrics_.receivePoll.longGaps.load()) +
+            " recv_buf_bytes=" + std::to_string(receiveBufferBytes_) +
+            " recv_batches=" + std::to_string(metrics_.receiveBatches.load()) +
+            " recv_batch_packets=" + std::to_string(metrics_.receiveBatchPackets.load()) +
             "\nrecover_output=" + std::to_string(metrics_.outputRecoveries.load()) +
             " recover_sequence=" + std::to_string(metrics_.sequenceRecoveries.load()) +
             " recover_timestamp=" + std::to_string(metrics_.timestampRecoveries.load()) +
@@ -94,7 +102,7 @@ private:
                 const uint8_t hello[] = {'L','A','H','I',Version};
                 ::send(socket_, hello, sizeof(hello), 0); lastHello = now;
             }
-            const auto length = ::recv(socket_, bytes.data(), bytes.size(), 0);
+            auto length = ::recv(socket_, bytes.data(), bytes.size(), 0);
             now = Clock::now();
             metrics_.receivePoll.record(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(now - previousPoll).count()));
             previousPoll = now;
@@ -103,12 +111,14 @@ private:
             } else if (length <= 0 && session && now - lastGoodAudio > std::chrono::seconds(1)) {
                 recover(RecoveryCause::Stall);
             }
+            int batchPackets = 0;
+            auto processPacket = [&](ssize_t packetLength, Clock::time_point arrival) {
             PacketInfo info;
-            if (length > 0 && parsePacket(bytes.data(), size_t(length), info)) {
+            if (packetLength > 0 && parsePacket(bytes.data(), size_t(packetLength), info)) {
                 const auto incomingRate = info.rate;
                 const auto incomingSession = info.session;
                 const auto timestamp = info.timestamp;
-                if (std::find(retiredSessions.begin(), retiredSessions.end(), incomingSession) != retiredSessions.end()) continue;
+                if (std::find(retiredSessions.begin(), retiredSessions.end(), incomingSession) != retiredSessions.end()) return;
                 const bool reopen = !player_ || player_->sourceRate() != int(incomingRate);
                 if (session != incomingSession || reopen) {
                     const bool count = session != 0 || (player_ && reopen);
@@ -118,7 +128,7 @@ private:
                         auto candidate = std::make_unique<AudioPlayer>(int(incomingRate), metrics_);
                         if (!candidate->open()) {
                             metrics_.outputOpenFailures.fetch_add(1, std::memory_order_relaxed);
-                            std::this_thread::sleep_for(std::chrono::milliseconds(100)); continue;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100)); return;
                         }
                         { std::lock_guard<std::mutex> lock(playerMutex_); player_ = std::move(candidate); }
                     }
@@ -126,15 +136,15 @@ private:
                 }
                 if (previousArrival == Clock::time_point{} || timestamp > previousTimestamp) {
                     if (previousArrival != Clock::time_point{}) {
-                        const double arrival = std::chrono::duration<double, std::milli>(now - previousArrival).count();
+                        const double arrivalMs = std::chrono::duration<double, std::milli>(arrival - previousArrival).count();
                         const double source = double(timestamp - previousTimestamp) * 1000 / incomingRate;
-                        jitterMs += (std::min(100.0, std::abs(arrival - source)) - jitterMs) / 16;
-                        const auto gap = uint64_t(std::max(0.0, arrival));
+                        jitterMs += (std::min(100.0, std::abs(arrivalMs - source)) - jitterMs) / 16;
+                        const auto gap = uint64_t(std::max(0.0, arrivalMs));
                         auto old = metrics_.maxGapMs.load(std::memory_order_relaxed);
                         while (gap > old && !metrics_.maxGapMs.compare_exchange_weak(old, gap, std::memory_order_relaxed)) {}
                         if (gap >= 20) metrics_.longGaps.fetch_add(1, std::memory_order_relaxed);
                     }
-                    previousArrival = now; previousTimestamp = timestamp;
+                    previousArrival = arrival; previousTimestamp = timestamp;
                 }
                 const auto packet = decodePacket(bytes.data(), info);
                 auto result = reorder.insert(info.sequence, packet);
@@ -148,9 +158,20 @@ private:
                     metrics_.duplicates.fetch_add(1, std::memory_order_relaxed);
                 } else {
                     metrics_.packets.fetch_add(1, std::memory_order_relaxed);
-                    lastGoodAudio = now;
+                    lastGoodAudio = arrival;
                 }
             }
+            };
+            while (length > 0 && batchPackets < 16) {
+                processPacket(length, now);
+                ++batchPackets;
+                if (batchPackets == 16) break;
+                length = ::recv(socket_, bytes.data(), bytes.size(), MSG_DONTWAIT);
+                if (length < 0) break;
+                now = Clock::now();
+            }
+            metrics_.receiveBatches.fetch_add(1, std::memory_order_relaxed);
+            metrics_.receiveBatchPackets.fetch_add(uint64_t(batchPackets), std::memory_order_relaxed);
             if (!player_) continue;
             const int waitMs = std::clamp(int(4 + 4 * jitterMs), 4, 20);
             AudioPacket next;
@@ -176,6 +197,7 @@ private:
     Metrics metrics_;
     std::unique_ptr<AudioPlayer> player_;
     mutable std::mutex playerMutex_;
+    int receiveBufferBytes_ = 0;
 };
 
 }

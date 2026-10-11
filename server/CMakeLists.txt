@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(lan_audio_server VERSION 1.2.4 LANGUAGES CXX)
+project(lan_audio_server VERSION 1.2.5 LANGUAGES CXX)
 
 set(LANAUDIO_PACKET_FRAMES 96 CACHE STRING "Audio frames per UDP packet (96, 192, or 240)")
 set_property(CACHE LANAUDIO_PACKET_FRAMES PROPERTY STRINGS 96 192 240)

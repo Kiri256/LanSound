@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(lanaudio_core_tests VERSION 1.2.4 LANGUAGES CXX)
+project(lanaudio_core_tests VERSION 1.2.5 LANGUAGES CXX)
 enable_testing()
 find_package(Threads REQUIRED)
 add_executable(audio-core-test audio_core_test.cpp)

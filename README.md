@@ -2,7 +2,7 @@
 
 通过 Android USB 网络共享，将 Windows 系统音频传输到 Android，优先保持音频连贯，其次限制延时，再保证音质。支持场景只考虑 USB 网络。
 
-版本 `1.2.4`，音频协议 `v2`，默认音频 UDP 端口 `30010`，发现 UDP 端口 `30011`。支持 Windows 10/11 和 Android 8.0+，服务端与客户端须使用同一音频协议版本及包大小。开发约束见 [AGENTS.md](AGENTS.md)，使用、实现和测试说明统一放在本文。
+版本 `1.2.5`，音频协议 `v2`，默认音频 UDP 端口 `30010`，发现 UDP 端口 `30011`。支持 Windows 10/11 和 Android 8.0+，服务端与客户端须使用同一音频协议版本及包大小。开发约束见 [AGENTS.md](AGENTS.md)，使用、实现和测试说明统一放在本文。
 
 ## 快速运行
 
@@ -169,7 +169,10 @@ WASAPI 设备帧位置保持连续样本顺序，QPC 时间戳定位首次采集
 | `hal_xruns` | Android 音频系统欠载计数 |
 | `reconnects` | 自动恢复次数 |
 | `stalls` | 持续 1 秒没有可接受新音频后主动恢复的次数 |
-| `recv_poll_max_ms` / `recv_long_polls` | 相邻接收调用返回之间的最大间隔 / 不小于 20ms 的次数，包含等待、线程调度及设备操作 |
+| `recv_poll_max_ms` / `recv_long_polls` | 阻塞接收调用返回之间的最大间隔 / 不小于 20ms 的次数，包含等待、线程调度及设备操作 |
+| `recv_buf_bytes` | Android 查询得到的内核 UDP 接收缓冲估算值；Linux 将 `SO_RCVBUF` 返回的双倍记账值除以 2 |
+| `recv_batches` | 完成的接收批次数；批次以一次阻塞接收开始，随后非阻塞接收最多补收至 16 包 |
+| `recv_batch_packets` | 接收批次中有效长度的 UDP 数据报数量，包括协议无效数据报 |
 | `recover_output` | Oboe 输出设备错误触发的恢复 |
 | `recover_sequence` | 序号超过乱序窗口触发的恢复 |
 | `recover_timestamp` | 输出包时间戳不连续触发的恢复 |

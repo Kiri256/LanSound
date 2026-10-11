@@ -17,6 +17,7 @@ struct Metrics {
     std::atomic<uint64_t> underruns{0}, missingNs{0}, droppedNs{0}, reconnects{0};
     std::atomic<uint64_t> queueDrops{0}, stallEvents{0}, longGaps{0}, activeSkips{0}, maxGapMs{0};
     IntervalStats receivePoll;
+    std::atomic<uint64_t> receiveBatches{0}, receiveBatchPackets{0};
     std::atomic<uint64_t> outputRecoveries{0}, sequenceRecoveries{0}, timestampRecoveries{0};
     std::atomic<uint64_t> sourceSessionRecoveries{0}, sourceRateRecoveries{0}, outputOpenFailures{0};
     void recordRecovery(RecoveryCause cause) {
