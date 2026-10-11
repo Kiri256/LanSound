@@ -12,7 +12,7 @@ import java.security.SecureRandom
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 
-data class DiscoveredServer(val name: String, val host: String, val port: Int, val protocol: Int, val frames: Int) {
+data class DiscoveredServer(val name: String, val host: String, val port: Int, val protocol: Int, val frames: Int, val networkPriority: Int = 2) {
     val compatible: Boolean get() = protocol == 2 && frames == BuildConfig.PACKET_FRAMES
     val label: String get() = "$name  $host:$port" + if (compatible) "" else " (不兼容)"
 }
@@ -25,16 +25,16 @@ class ServerDiscovery(
     @Volatile private var closed = false
     private val sockets = CopyOnWriteArrayList<DatagramSocket>()
 
-    private data class Probe(val socket: DatagramSocket, val targets: Set<InetAddress>)
+    private data class Probe(val socket: DatagramSocket, val targets: Set<InetAddress>, val priority: Int)
 
-    private fun openProbe(local: InetAddress, targets: Set<InetAddress>): Probe? {
+    private fun openProbe(local: InetAddress, targets: Set<InetAddress>, priority: Int): Probe? {
         val udp = try { DatagramSocket(0, local) } catch (_: java.io.IOException) { return null }
         sockets.add(udp)
         try {
             if (closed) { udp.close(); return null }
             udp.broadcast = true
             udp.soTimeout = 5
-            return Probe(udp, targets)
+            return Probe(udp, targets, priority)
         } catch (_: java.io.IOException) {
             udp.close()
             return null
@@ -63,7 +63,13 @@ class ServerDiscovery(
                         if (knownAddress != null && (ByteBuffer.wrap(knownAddress.address).int and mask) == (value and mask)) {
                             destinations.add(knownAddress)
                         }
-                        openProbe(local, destinations)?.let(result::add)
+                        val name = network.displayName.lowercase()
+                        val priority = when {
+                            "rndis" in name || "usb" in name || "tether" in name -> 0
+                            "ethernet" in name -> 1
+                            else -> 2
+                        }
+                        openProbe(local, destinations, priority)?.let(result::add)
                     }
                 }
             }
@@ -99,7 +105,7 @@ class ServerDiscovery(
                         try { probe.socket.receive(packet) }
                         catch (_: SocketTimeoutException) { continue }
                         catch (_: java.io.IOException) { continue }
-                        decode(packet, nonce)?.let(onFound)
+                        decode(packet, nonce, probe.priority)?.let(onFound)
                     }
                     Thread.sleep(10)
                 }
@@ -112,7 +118,7 @@ class ServerDiscovery(
 
     override fun close() { closed = true; sockets.forEach { it.close() } }
 
-    private fun decode(packet: DatagramPacket, nonce: Int): DiscoveredServer? {
+    private fun decode(packet: DatagramPacket, nonce: Int, networkPriority: Int): DiscoveredServer? {
         if (packet.address !is Inet4Address || packet.length < 15) return null
         val reply = ByteBuffer.wrap(packet.data, packet.offset, packet.length).order(ByteOrder.BIG_ENDIAN)
         if (reply.int != 0x4c414452 || reply.get().toInt() != 1 || reply.int != nonce) return null
@@ -124,6 +130,6 @@ class ServerDiscovery(
         val bytes = ByteArray(nameLength); reply.get(bytes)
         val host = packet.address.hostAddress ?: return null
         val name = bytes.toString(Charsets.UTF_8).filter { !it.isISOControl() }.ifBlank { "Windows" }
-        return DiscoveredServer(name, host, port, protocol, frames)
+        return DiscoveredServer(name, host, port, protocol, frames, networkPriority)
     }
 }

@@ -8,10 +8,14 @@ namespace lanaudio {
 // Construction happens before playback starts; render() allocates and locks nothing.
 class PlaybackBuffer {
 public:
-    static constexpr int TargetMs = 100, MaxBufferedMs = 150;
-    PlaybackBuffer(int sourceRate, int outputRate, Metrics& metrics)
+    static constexpr int MinTargetMs = 1, DefaultTargetMs = 64, TargetMs = 100, MaxBufferedMs = 150;
+    PlaybackBuffer(int sourceRate, int outputRate, Metrics& metrics, int targetMs = TargetMs)
         : sourceRate_(sourceRate), outputRate_(outputRate), metrics_(metrics),
-          target_(sourceRate * TargetMs / 1000), ratio_(double(sourceRate) / outputRate), filter_(ratio_) {}
+          targetMs_(std::clamp(targetMs, MinTargetMs, MaxBufferedMs - 1)),
+          targetMsValue_(targetMs_), target_(sourceRate * targetMs_ / 1000), ratio_(double(sourceRate) / outputRate), filter_(ratio_) {}
+    void requestTargetMs(int targetMs) {
+        pendingTargetMs_.store(std::clamp(targetMs, MinTargetMs, MaxBufferedMs - 1), std::memory_order_release);
+    }
     void write(const Stereo* samples, size_t count) {
         if (!ring_.write(samples, count)) {
             metrics_.queueDrops.fetch_add(1, std::memory_order_relaxed);
@@ -23,10 +27,18 @@ public:
         write(zeros.data(), zeros.size());
     }
     void reset() { resetBoundary_.store(ring_.end(), std::memory_order_release); }
-    int targetMs() const { return TargetMs; }
+    int targetMs() const { return targetMsValue_.load(std::memory_order_relaxed); }
     int correctionPpm() const { return correctionPpm_.load(std::memory_order_relaxed); }
     uint64_t bufferedMs() const { return buffered_.load(std::memory_order_relaxed) * 1000 / sourceRate_; }
     void render(float* output, int frames) {
+        const int requestedTarget = pendingTargetMs_.exchange(0, std::memory_order_acquire);
+        if (requestedTarget > 0 && requestedTarget != targetMs_) {
+            targetMs_ = requestedTarget;
+            targetMsValue_.store(targetMs_, std::memory_order_relaxed);
+            target_ = uint64_t(sourceRate_) * targetMs_ / 1000;
+            filteredDepth_ = double(target_);
+            correction_ = 0;
+        }
         const auto boundary = resetBoundary_.load(std::memory_order_acquire);
         const auto end = ring_.end();
         constexpr uint64_t history = SincResampler::Half - 1;
@@ -103,6 +115,9 @@ private:
     void recordDrop(uint64_t frames) { metrics_.droppedNs.fetch_add(frames * 1000000000 / sourceRate_, std::memory_order_relaxed); }
     int sourceRate_, outputRate_;
     Metrics& metrics_;
+    int targetMs_;
+    std::atomic<int> targetMsValue_;
+    std::atomic<int> pendingTargetMs_{0};
     uint64_t target_;
     double ratio_;
     FrameRing<32768> ring_;

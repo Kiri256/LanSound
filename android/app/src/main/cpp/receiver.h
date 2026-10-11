@@ -14,11 +14,14 @@ using Clock = std::chrono::steady_clock;
 
 class Session {
 public:
-    Session(const char* host, int port) {
+    Session(const char* host, int port, int targetMs) : targetMs_(targetMs) {
         server_.sin_family = AF_INET; server_.sin_port = htons(uint16_t(port));
         valid_ = inet_pton(AF_INET, host, &server_.sin_addr) == 1;
     }
     ~Session() { stop(); }
+    void setTargetMs(int targetMs) {
+        if (targetMs >= PlaybackBuffer::MinTargetMs && targetMs < PlaybackBuffer::MaxBufferedMs) targetMs_.store(targetMs, std::memory_order_release);
+    }
     bool start() {
         if (!valid_) return false;
         socket_ = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -125,7 +128,7 @@ private:
                     if (session && session != incomingSession) retiredSessions[retiredAt++ % retiredSessions.size()] = session;
                     recover(reopen ? RecoveryCause::SourceRate : RecoveryCause::SourceSession, count);
                     if (reopen) {
-                        auto candidate = std::make_unique<AudioPlayer>(int(incomingRate), metrics_);
+                        auto candidate = std::make_unique<AudioPlayer>(int(incomingRate), metrics_, targetMs_);
                         if (!candidate->open()) {
                             metrics_.outputOpenFailures.fetch_add(1, std::memory_order_relaxed);
                             std::this_thread::sleep_for(std::chrono::milliseconds(100)); return;
@@ -173,6 +176,11 @@ private:
             metrics_.receiveBatches.fetch_add(1, std::memory_order_relaxed);
             metrics_.receiveBatchPackets.fetch_add(uint64_t(batchPackets), std::memory_order_relaxed);
             if (!player_) continue;
+            const int requestedTarget = targetMs_.load(std::memory_order_acquire);
+            if (requestedTarget != appliedTargetMs_) {
+                player_->requestTargetMs(requestedTarget);
+                appliedTargetMs_ = requestedTarget;
+            }
             const int waitMs = std::clamp(int(4 + 4 * jitterMs), 4, 20);
             AudioPacket next;
             for (int steps = 0; steps < 128; ++steps) {
@@ -190,6 +198,8 @@ private:
         }
     }
     sockaddr_in server_{};
+    std::atomic<int> targetMs_;
+    int appliedTargetMs_ = 0;
     bool valid_ = false;
     int socket_ = -1;
     std::atomic<bool> running_{false};

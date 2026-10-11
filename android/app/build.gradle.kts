@@ -11,8 +11,8 @@ android {
         applicationId = "local.lanaudio"
         minSdk = 26
         targetSdk = 35
-        versionCode = 125
-        versionName = "1.2.5"
+        versionCode = 126
+        versionName = "1.2.6"
         val packetFrames = providers.gradleProperty("lanaudio.packetFrames").orNull ?: "96"
         require(packetFrames in listOf("96", "192", "240")) { "lanaudio.packetFrames must be 96, 192, or 240" }
         buildConfigField("int", "PACKET_FRAMES", packetFrames)

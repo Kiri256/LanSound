@@ -2,6 +2,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <mmdeviceapi.h>
 #include <avrt.h>
 #include <ksmedia.h>
@@ -18,6 +19,27 @@
 #include "wasapi_capture.h"
 using Microsoft::WRL::ComPtr;
 namespace lanaudio {
+namespace {
+Microsoft::WRL::ComPtr<IAudioEndpointVolume> mutedOutput;
+BOOL previousMute = FALSE;
+bool outputWasMuted = false;
+}
+void muteDefaultOutput() {
+    if (mutedOutput) return;
+    Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+    Microsoft::WRL::ComPtr<IMMDevice> device;
+    Microsoft::WRL::ComPtr<IAudioEndpointVolume> volume;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator))) ||
+        FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) ||
+        FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, &volume))) return;
+    if (FAILED(volume->GetMute(&previousMute)) || FAILED(volume->SetMute(TRUE, nullptr))) return;
+    outputWasMuted = true;
+    mutedOutput = volume;
+}
+void restoreDefaultOutput() {
+    if (mutedOutput && outputWasMuted) mutedOutput->SetMute(previousMute, nullptr);
+    mutedOutput.Reset(); outputWasMuted = false;
+}
 uint64_t clockUs() {
     static const uint64_t frequency = [] { LARGE_INTEGER value; QueryPerformanceFrequency(&value); return uint64_t(value.QuadPart); }();
     LARGE_INTEGER value; QueryPerformanceCounter(&value);
@@ -61,7 +83,7 @@ struct CaptureReport {
     }
     ~CaptureReport() { print(); }
 };
-void captureLoop(PacketSender& sender, const std::atomic<bool>& running) {
+void captureLoop(PacketSender& sender, const std::atomic<bool>& running, const std::atomic<bool>& paused) {
     CaptureResources resources;
     DWORD taskIndex = 0;
     resources.task = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
@@ -143,13 +165,14 @@ void captureLoop(PacketSender& sender, const std::atomic<bool>& running) {
     CaptureReport report{*timeline};
     sender.configure(mix->nSamplesPerSec);
     if (FAILED(resources.client->Start())) throw std::runtime_error("Cannot start capture");
+    muteDefaultOutput();
     std::cout << "LanAudio server v" << LANAUDIO_VERSION_STRING << "; capturing "
               << mix->nSamplesPerSec << " Hz, " << mix->nChannels
               << " channels; protocol v" << unsigned(Version)
               << "; capture_wait_us=" << waitUs << "; high_resolution_timer=" << highResolution << std::endl;
     uint64_t lastDeviceCheck = GetTickCount64();
     uint64_t lastReport = GetTickCount64();
-    while (running.load()) {
+    while (running.load() && !paused.load()) {
         if (GetTickCount64() - lastDeviceCheck > 2000) {
             ComPtr<IMMDevice> current;
             if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &current)) || deviceId(current.Get()) != initialDeviceId)

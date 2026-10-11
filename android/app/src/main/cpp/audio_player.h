@@ -10,7 +10,7 @@ namespace lanaudio {
 // renders the platform-independent buffer or requests recovery after an error.
 class AudioPlayer final : public oboe::AudioStreamDataCallback, public oboe::AudioStreamErrorCallback {
 public:
-    AudioPlayer(int rate, Metrics& metrics) : rate_(rate), metrics_(metrics) {}
+    AudioPlayer(int rate, Metrics& metrics, int targetMs) : rate_(rate), metrics_(metrics), targetMs_(targetMs) {}
     ~AudioPlayer() { close(); }
     bool open() {
         auto tryOpen = [&](oboe::SharingMode sharing) {
@@ -28,7 +28,7 @@ public:
         if (stream_->getFormat() != oboe::AudioFormat::Float || stream_->getChannelCount() != 2 || outputRate_ <= 0) {
             close(); return false;
         }
-        buffer_ = std::make_unique<PlaybackBuffer>(rate_, outputRate_, metrics_);
+        buffer_ = std::make_unique<PlaybackBuffer>(rate_, outputRate_, metrics_, targetMs_);
         stream_->setBufferSizeInFrames(stream_->getFramesPerBurst() * 2);
         if (stream_->requestStart() != oboe::Result::OK) { close(); return false; }
         return true;
@@ -41,6 +41,7 @@ public:
     int sourceRate() const { return rate_; }
     void resetTimeline() { buffer_->reset(); }
     void write(const Stereo* samples, size_t count) { buffer_->write(samples, count); }
+    void requestTargetMs(int targetMs) { if (buffer_) buffer_->requestTargetMs(targetMs); }
     void silence() { buffer_->silence(); }
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream*, void* data, int32_t frames) override {
         buffer_->render(static_cast<float*>(data), frames);
@@ -62,6 +63,7 @@ public:
     }
 private:
     int rate_, outputRate_ = 0;
+    int targetMs_;
     Metrics& metrics_;
     std::shared_ptr<oboe::AudioStream> stream_;
     std::unique_ptr<PlaybackBuffer> buffer_;

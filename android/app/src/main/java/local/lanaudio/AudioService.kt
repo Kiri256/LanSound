@@ -34,6 +34,7 @@ class AudioService : Service() {
 
         val host = intent?.getStringExtra(EXTRA_HOST) ?: run { stopSelf(startId); return START_NOT_STICKY }
         val port = intent.getIntExtra(EXTRA_PORT, 30010)
+        val targetMs = intent.getIntExtra(EXTRA_TARGET_MS, 100)
         startForeground(NOTIFICATION_ID, notification())
         val audioManager = getSystemService(AudioManager::class.java)
         if (focusRequest == null) {
@@ -53,7 +54,7 @@ class AudioService : Service() {
         acquireCpuLock()
         // Service callbacks are serialized on the main thread. Native start only
         // creates the receiver; opening the output happens on that receiver.
-        running = NativeAudio.nativeStartReceiver(host, port)
+        running = NativeAudio.nativeStartReceiver(host, port, targetMs)
         if (!running) stopSelf(startId)
         return START_NOT_STICKY
     }
@@ -104,11 +105,13 @@ class AudioService : Service() {
         private const val ACTION_STOP = "local.lanaudio.STOP"
         private const val EXTRA_HOST = "host"
         private const val EXTRA_PORT = "port"
+        private const val EXTRA_TARGET_MS = "target_ms"
 
-        fun startIntent(context: Context, host: String, port: Int) = Intent(context, AudioService::class.java)
+        fun startIntent(context: Context, host: String, port: Int, targetMs: Int) = Intent(context, AudioService::class.java)
             .setAction(ACTION_START)
             .putExtra(EXTRA_HOST, host)
             .putExtra(EXTRA_PORT, port)
+            .putExtra(EXTRA_TARGET_MS, targetMs)
 
         fun stopIntent(context: Context) = Intent(context, AudioService::class.java).setAction(ACTION_STOP)
     }

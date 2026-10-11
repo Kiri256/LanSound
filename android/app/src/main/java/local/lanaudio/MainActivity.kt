@@ -23,10 +23,13 @@ import android.widget.AdapterView
 import android.widget.ImageButton
 import android.view.View
 import android.text.InputType
+import android.text.Editable
+import android.text.TextWatcher
 
 class MainActivity : Activity() {
     private lateinit var address: EditText
     private lateinit var port: EditText
+    private lateinit var targetBuffer: EditText
     private lateinit var connect: Button
     private lateinit var status: TextView
     private lateinit var metrics: TextView
@@ -71,7 +74,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(6), 0, dp(20))
         }, match())
 
-        root.addView(label("USB 网络服务器"))
+        root.addView(label("网络服务器（优先 USB）"))
         val scanRow = LinearLayout(this)
         serverLabels = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, mutableListOf("选择服务器"))
         servers = Spinner(this).apply {
@@ -81,14 +84,7 @@ class MainActivity : Activity() {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     val server = foundServers.getOrNull(position - 1) ?: return
                     setSelection(0)
-                    if (active) return
-                    if (!server.compatible) {
-                        scanStatus.text = "音频协议或包大小不兼容"
-                        return
-                    }
-                    address.setText(server.host)
-                    port.setText(server.port.toString())
-                    toggle()
+                    connectServer(server)
                 }
             }
         }
@@ -146,12 +142,45 @@ class MainActivity : Activity() {
             setPadding(0, dp(24), 0, dp(6))
         }
         root.addView(status, match())
+
+        val advanced = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        targetBuffer = EditText(this).apply {
+            hint = "例如 64"
+            setText(preferences.getInt(KEY_TARGET_BUFFER, DEFAULT_TARGET_BUFFER).toString())
+            setSingleLine(true)
+            textSize = 16f
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setTextColor(Color.WHITE)
+            setPadding(dp(12), 0, dp(12), 0)
+            setBackgroundColor(Color.rgb(26, 34, 36))
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    val value = s?.toString()?.toIntOrNull() ?: return
+                    if (value in 1..149) {
+                        preferences.edit().putInt(KEY_TARGET_BUFFER, value).apply()
+                        if (active) NativeAudio.nativeSetTargetBuffer(value)
+                    }
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
+        }
+        advanced.addView(label("播放缓冲目标（毫秒）"))
+        advanced.addView(targetBuffer, LinearLayout.LayoutParams(-1, dp(48)))
         metrics = TextView(this).apply {
             text = ""
             textSize = 12f
             setTextColor(Color.rgb(155, 168, 170))
         }
-        root.addView(ScrollView(this).apply { addView(metrics) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        advanced.addView(ScrollView(this).apply { addView(metrics) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(Button(this).apply {
+            text = "高级设置"
+            isAllCaps = false
+            setOnClickListener {
+                advanced.visibility = if (advanced.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            }
+        }, LinearLayout.LayoutParams(-1, dp(44)))
+        root.addView(advanced, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(Button(this).apply {
             text = "USB 网络共享设置"
             isAllCaps = false
@@ -182,8 +211,13 @@ class MainActivity : Activity() {
         }
         val host = address.text.toString().trim()
         val portNumber = port.text.toString().toIntOrNull()
+        val targetMs = targetBuffer.text.toString().toIntOrNull()
         if (host.isBlank() || portNumber == null || portNumber !in 1..65535) {
             status.text = "请输入有效的服务器地址和端口"
+            return
+        }
+        if (targetMs == null || targetMs !in 1..149) {
+            status.text = "播放缓冲必须是 1-149 之间的整数"
             return
         }
         preferences.edit()
@@ -193,7 +227,7 @@ class MainActivity : Activity() {
         (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
             .hideSoftInputFromWindow(address.windowToken, 0)
         stopDiscovery()
-        startForegroundService(AudioService.startIntent(this, host, portNumber))
+        startForegroundService(AudioService.startIntent(this, host, portNumber, targetMs))
         updateConnection(true, "正在连接并预热音频缓冲")
     }
 
@@ -201,6 +235,17 @@ class MainActivity : Activity() {
         stopService(AudioService.stopIntent(this))
         updateConnection(false, "已断开")
         scanServers()
+    }
+
+    private fun connectServer(server: DiscoveredServer) {
+        if (active) return
+        if (!server.compatible) {
+            scanStatus.text = "音频协议或包大小不兼容"
+            return
+        }
+        address.setText(server.host)
+        port.setText(server.port.toString())
+        toggle()
     }
 
     private fun updateConnection(connected: Boolean, message: String? = null) {
@@ -252,8 +297,10 @@ class MainActivity : Activity() {
             handler.post {
                 if (discovery !== scan || active) return@post
                 if (foundServers.size < 64 && foundServers.none { it.host == server.host && it.port == server.port }) {
-                    foundServers.add(server)
-                    serverLabels.add(server.label)
+                    val index = foundServers.indexOfFirst { it.networkPriority > server.networkPriority }
+                        .takeIf { it >= 0 } ?: foundServers.size
+                    foundServers.add(index, server)
+                    serverLabels.insert(server.label, index + 1)
                     scanStatus.text = "已发现 ${foundServers.size} 台服务器 · 正在扫描"
                 }
             }
@@ -263,6 +310,9 @@ class MainActivity : Activity() {
                 discovery = null
                 scanStatus.text = error?.let { "扫描失败：$it" }
                     ?: if (foundServers.isEmpty()) "未发现服务器" else "已发现 ${foundServers.size} 台服务器"
+                if (error == null && !active) {
+                    foundServers.firstOrNull { it.compatible }?.let(::connectServer)
+                }
             }
         })
         discovery = scan
@@ -289,7 +339,9 @@ class MainActivity : Activity() {
         private const val PREFERENCES = "lan_audio_preferences"
         private const val KEY_HOST = "server_host"
         private const val KEY_PORT = "server_port"
+        private const val KEY_TARGET_BUFFER = "target_buffer_ms"
         private const val DEFAULT_PORT = 30010
+        private const val DEFAULT_TARGET_BUFFER = 64
     }
 
 }
